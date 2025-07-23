@@ -210,6 +210,26 @@ def create_visualizations(df, date_col_found):
     except Exception as e:
         st.error(f"시각화 처리 중 오류가 발생했습니다: {e}")
 
+def safe_dataframe_to_text(df, method='head'):
+    """tabulate 의존성 없이 데이터프레임을 텍스트로 변환"""
+    try:
+        if method == 'head':
+            return df.head().to_markdown(index=False)
+        elif method == 'describe':
+            return df.describe().to_markdown()
+    except ImportError:
+        # tabulate가 없는 경우 대안
+        if method == 'head':
+            return df.head().to_string(index=False)
+        elif method == 'describe':
+            return df.describe().to_string()
+    except Exception as e:
+        # 기타 오류 시 기본 문자열 변환
+        if method == 'head':
+            return str(df.head())
+        elif method == 'describe':
+            return str(df.describe())
+
 # 메인 로직
 df = load_data()
 
@@ -236,9 +256,9 @@ if client and df is not None:
         if user_question:
             with st.spinner("GPT가 데이터를 분석 중입니다..."):
                 try:
-                    # 데이터 요약 정보 준비
-                    data_head = df.head().to_markdown(index=False)
-                    data_description = df.describe().to_markdown()
+                    # tabulate 의존성 없이 데이터 요약 정보 준비
+                    data_head = safe_dataframe_to_text(df, 'head')
+                    data_description = safe_dataframe_to_text(df, 'describe')
                     
                     buffer = io.StringIO() 
                     df.info(buf=buffer, verbose=True, show_counts=True)
@@ -271,7 +291,7 @@ if client and df is not None:
                     3. **의사 결정 및 정책 인사이트:** 분석 결과를 바탕으로 한 구체적인 제안
                     """
 
-                    # OpenAI API 호출 (모델명 수정)
+                    # OpenAI API 호출
                     response = client.chat.completions.create(
                         model="gpt-4",  # 또는 "gpt-3.5-turbo"
                         messages=[
@@ -294,6 +314,10 @@ if client and df is not None:
                 except Exception as e:
                     st.error(f"GPT API 호출 중 오류가 발생했습니다: {e}")
                     st.info("API 키가 유효한지, 사용 한도가 남아있는지 확인해주세요.")
+                    
+                    # 디버깅을 위한 상세 오류 정보 (개발 시에만 사용)
+                    if st.checkbox("상세 오류 정보 보기"):
+                        st.exception(e)
         else:
             st.warning("질문을 입력해주세요!")
 
