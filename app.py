@@ -112,67 +112,112 @@ def get_visualization_recommendations(df, user_question, date_col_found):
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
         categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
         
-        # 데이터 구조 정보
-        data_info = {
-            "columns": list(df.columns),
-            "numeric_columns": numeric_cols,
-            "categorical_columns": categorical_cols,
-            "data_size": f"{df.shape[0]} 행, {df.shape[1]} 열",
-            "has_date": date_col_found,
-            "sample_data": df.head(3).to_dict()
-        }
+        # 데이터 구조 정보 간소화
+        data_info = f"""
+        컬럼: {list(df.columns)}
+        수치형 컬럼: {numeric_cols}
+        범주형 컬럼: {categorical_cols}
+        데이터 크기: {df.shape[0]} 행, {df.shape[1]} 열
+        날짜 컬럼 존재: {date_col_found}
+        """
         
         if date_col_found and 'Date' in df.columns:
-            data_info["date_range"] = f"{df['Date'].min().strftime('%Y-%m-%d')} ~ {df['Date'].max().strftime('%Y-%m-%d')}"
+            data_info += f"\n날짜 범위: {df['Date'].min().strftime('%Y-%m-%d')} ~ {df['Date'].max().strftime('%Y-%m-%d')}"
         
         prompt = f"""
-        사용자가 환경 데이터에 대해 다음과 같은 질문을 했습니다: "{user_question}"
+        사용자 질문: "{user_question}"
 
-        데이터 구조:
-        {json.dumps(data_info, ensure_ascii=False, indent=2)}
+        데이터 정보:
+        {data_info}
 
-        이 데이터와 질문에 가장 적합한 시각화 2개를 추천해주세요. 
-        각 시각화에 대해 다음 형식의 JSON으로 응답해주세요:
+        이 데이터에 적합한 시각화 2개를 JSON으로만 응답하세요:
 
         {{
             "visualization_1": {{
-                "type": "line_plot/bar_plot/scatter_plot/histogram",
-                "title": "그래프 제목",
-                "x_column": "x축 컬럼명",
-                "y_column": "y축 컬럼명",
-                "description": "이 시각화가 보여주는 내용과 의미"
+                "type": "line_plot",
+                "title": "시간에 따른 변화",
+                "x_column": "{numeric_cols[0] if numeric_cols else 'Date'}",
+                "y_column": "{numeric_cols[0] if numeric_cols else list(df.columns)[0]}",
+                "description": "데이터의 시간적 변화를 보여줍니다"
             }},
             "visualization_2": {{
-                "type": "line_plot/bar_plot/scatter_plot/histogram",
-                "title": "그래프 제목", 
-                "x_column": "x축 컬럼명",
-                "y_column": "y축 컬럼명",
-                "description": "이 시각화가 보여주는 내용과 의미"
+                "type": "bar_plot",
+                "title": "분포 현황", 
+                "x_column": "{categorical_cols[0] if categorical_cols else list(df.columns)[0]}",
+                "y_column": "{numeric_cols[0] if numeric_cols else list(df.columns)[1]}",
+                "description": "데이터의 분포를 보여줍니다"
             }}
         }}
 
-        주의사항:
-        - x_column과 y_column은 실제 데이터에 존재하는 컬럼명을 사용하세요
-        - 환경 데이터 분석에 의미 있는 시각화를 추천하세요
-        - JSON 형식만 응답하고 다른 텍스트는 포함하지 마세요
+        위 형식으로 실제 컬럼명을 사용하여 JSON만 응답하세요.
         """
 
         response = client.chat.completions.create(
             model="gpt-4",
             messages=[
-                {"role": "system", "content": "You are an expert in environmental data visualization. Respond only with valid JSON."},
+                {"role": "system", "content": "You are an expert in data visualization. Respond only with valid JSON using actual column names from the data."},
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.3,
-            max_tokens=1000
+            temperature=0.1,
+            max_tokens=800
         )
         
-        viz_recommendations = json.loads(response.choices[0].message.content)
-        return viz_recommendations
+        response_text = response.choices[0].message.content.strip()
+        
+        # JSON 파싱 시도
+        try:
+            # 코드 블록 제거
+            if response_text.startswith('```'):
+                response_text = response_text.split('```')[1]
+                if response_text.startswith('json'):
+                    response_text = response_text[4:]
+            
+            viz_recommendations = json.loads(response_text)
+            return viz_recommendations
+            
+        except json.JSONDecodeError as e:
+            st.warning(f"GPT JSON 파싱 실패, 기본 시각화를 생성합니다: {e}")
+            # 기본 시각화 반환
+            return create_default_visualizations(df, numeric_cols, date_col_found)
         
     except Exception as e:
-        st.error(f"시각화 추천 중 오류: {e}")
+        st.warning(f"시각화 추천 중 오류, 기본 시각화를 생성합니다: {e}")
+        return create_default_visualizations(df, df.select_dtypes(include=['number']).columns.tolist(), date_col_found)
+
+def create_default_visualizations(df, numeric_cols, date_col_found):
+    """기본 시각화 설정 반환"""
+    if not numeric_cols:
         return None
+    
+    viz1 = {
+        "type": "line_plot",
+        "title": f"{numeric_cols[0]} 변화 추이",
+        "x_column": "Date" if date_col_found and 'Date' in df.columns else df.columns[0],
+        "y_column": numeric_cols[0],
+        "description": f"{numeric_cols[0]}의 변화 패턴을 보여줍니다"
+    }
+    
+    viz2 = {
+        "type": "histogram",
+        "title": f"{numeric_cols[0]} 분포",
+        "x_column": numeric_cols[0],
+        "y_column": numeric_cols[0],
+        "description": f"{numeric_cols[0]}의 분포 현황을 보여줍니다"
+    }
+    
+    if len(numeric_cols) > 1:
+        viz2 = {
+            "type": "scatter_plot",
+            "title": f"{numeric_cols[0]} vs {numeric_cols[1]}",
+            "x_column": numeric_cols[0],
+            "y_column": numeric_cols[1],
+            "description": f"{numeric_cols[0]}와 {numeric_cols[1]}의 상관관계를 보여줍니다"
+        }
+    
+    return {
+        "visualization_1": viz1,
+        "visualization_2": viz2
+    }
 
 def create_visualization_from_recommendation(df, viz_config, viz_num):
     """GPT 추천에 따라 시각화 생성"""
@@ -183,45 +228,101 @@ def create_visualization_from_recommendation(df, viz_config, viz_num):
         y_col = viz_config.get('y_column')
         description = viz_config.get('description', '')
         
-        # 컬럼 존재 확인
-        if x_col not in df.columns or y_col not in df.columns:
-            st.warning(f"시각화 {viz_num}: 추천된 컬럼({x_col}, {y_col})이 데이터에 없습니다.")
-            return
+        # 컬럼 존재 확인 및 대안 제시
+        if x_col not in df.columns:
+            st.warning(f"컬럼 '{x_col}'이 없습니다. 사용 가능한 컬럼: {list(df.columns)}")
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            if numeric_cols:
+                x_col = numeric_cols[0]
+            else:
+                x_col = df.columns[0]
+                
+        if y_col not in df.columns:
+            st.warning(f"컬럼 '{y_col}'이 없습니다. 사용 가능한 컬럼: {list(df.columns)}")
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            if numeric_cols:
+                y_col = numeric_cols[0]
+            else:
+                y_col = df.columns[1] if len(df.columns) > 1 else df.columns[0]
         
+        # matplotlib 설정
+        plt.style.use('default')
         fig, ax = plt.subplots(figsize=(10, 6))
+        plt.rcParams['font.family'] = ['DejaVu Sans', 'Malgun Gothic', 'AppleGothic']
         
+        # 시각화 생성
         if viz_type == 'line_plot':
-            if x_col == 'Date' or 'date' in x_col.lower():
-                sns.lineplot(data=df, x=x_col, y=y_col, ax=ax)
+            if pd.api.types.is_numeric_dtype(df[x_col]) and pd.api.types.is_numeric_dtype(df[y_col]):
+                df_sorted = df.sort_values(x_col)
+                ax.plot(df_sorted[x_col], df_sorted[y_col], marker='o', linewidth=2, markersize=4)
             else:
                 sns.lineplot(data=df, x=x_col, y=y_col, ax=ax)
                 
         elif viz_type == 'bar_plot':
-            if len(df[x_col].unique()) > 20:  # 너무 많은 카테고리가 있으면 상위 20개만
-                top_values = df.nlargest(20, y_col)
-                sns.barplot(data=top_values, x=x_col, y=y_col, ax=ax)
-                plt.xticks(rotation=45)
+            if df[x_col].dtype == 'object' or len(df[x_col].unique()) < 20:
+                # 범주형 데이터의 경우
+                if df[y_col].dtype in ['int64', 'float64']:
+                    group_data = df.groupby(x_col)[y_col].mean().sort_values(ascending=False).head(15)
+                    ax.bar(range(len(group_data)), group_data.values)
+                    ax.set_xticks(range(len(group_data)))
+                    ax.set_xticklabels(group_data.index, rotation=45)
+                else:
+                    value_counts = df[x_col].value_counts().head(15)
+                    ax.bar(range(len(value_counts)), value_counts.values)
+                    ax.set_xticks(range(len(value_counts)))
+                    ax.set_xticklabels(value_counts.index, rotation=45)
             else:
-                sns.barplot(data=df, x=x_col, y=y_col, ax=ax)
-                plt.xticks(rotation=45)
+                # 수치형 데이터 히스토그램
+                ax.hist(df[x_col].dropna(), bins=20, alpha=0.7)
                 
         elif viz_type == 'scatter_plot':
-            sns.scatterplot(data=df, x=x_col, y=y_col, ax=ax, alpha=0.6)
-            
+            if pd.api.types.is_numeric_dtype(df[x_col]) and pd.api.types.is_numeric_dtype(df[y_col]):
+                ax.scatter(df[x_col], df[y_col], alpha=0.6, s=50)
+            else:
+                st.warning(f"산점도를 위해서는 수치형 데이터가 필요합니다. ({x_col}: {df[x_col].dtype}, {y_col}: {df[y_col].dtype})")
+                return
+                
         elif viz_type == 'histogram':
-            sns.histplot(data=df, x=y_col, ax=ax, bins=30)
-            
-        ax.set_title(title, fontsize=14, fontweight='bold')
-        ax.set_xlabel(x_col)
-        ax.set_ylabel(y_col)
-        plt.grid(True, alpha=0.3)
+            if pd.api.types.is_numeric_dtype(df[y_col]):
+                ax.hist(df[y_col].dropna(), bins=20, alpha=0.7, edgecolor='black')
+            else:
+                value_counts = df[y_col].value_counts().head(15)
+                ax.bar(range(len(value_counts)), value_counts.values)
+                ax.set_xticks(range(len(value_counts)))
+                ax.set_xticklabels(value_counts.index, rotation=45)
+        
+        # 그래프 꾸미기
+        ax.set_title(title, fontsize=14, fontweight='bold', pad=20)
+        ax.set_xlabel(x_col, fontsize=12)
+        ax.set_ylabel(y_col, fontsize=12)
+        ax.grid(True, alpha=0.3)
+        
+        # 레이아웃 조정
         plt.tight_layout()
         
+        # Streamlit에 표시
         st.pyplot(fig)
         st.caption(f"**{title}**: {description}")
         
+        # 메모리 정리
+        plt.close(fig)
+        
     except Exception as e:
         st.error(f"시각화 {viz_num} 생성 중 오류: {e}")
+        st.write(f"디버깅 정보 - 시각화 설정: {viz_config}")
+        
+        # 간단한 대안 시각화 시도
+        try:
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            if numeric_cols:
+                fig, ax = plt.subplots(figsize=(8, 5))
+                ax.plot(df[numeric_cols[0]].head(50), marker='o')
+                ax.set_title(f"{numeric_cols[0]} 기본 차트")
+                ax.grid(True, alpha=0.3)
+                st.pyplot(fig)
+                plt.close(fig)
+        except:
+            st.error("기본 시각화도 생성할 수 없습니다.")
 
 def safe_dataframe_to_text(df, method='head'):
     """tabulate 의존성 없이 데이터프레임을 텍스트로 변환"""
@@ -269,9 +370,19 @@ if client and df is not None:
                 
                 # 1단계: 시각화 추천 받기
                 st.subheader("📈 GPT 추천 시각화")
+                
+                # 진행 상황 표시
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                status_text.text("GPT로부터 시각화 추천을 받는 중...")
+                progress_bar.progress(25)
+                
                 viz_recommendations = get_visualization_recommendations(df, user_question, date_col_found)
+                progress_bar.progress(50)
                 
                 if viz_recommendations:
+                    status_text.text("시각화를 생성하는 중...")
                     col1, col2 = st.columns(2)
                     
                     with col1:
@@ -279,10 +390,45 @@ if client and df is not None:
                         if 'visualization_1' in viz_recommendations:
                             create_visualization_from_recommendation(df, viz_recommendations['visualization_1'], 1)
                     
+                    progress_bar.progress(75)
+                    
                     with col2:
                         st.markdown("### 📊 시각화 2")
                         if 'visualization_2' in viz_recommendations:
                             create_visualization_from_recommendation(df, viz_recommendations['visualization_2'], 2)
+                    
+                    progress_bar.progress(100)
+                    status_text.text("시각화 생성 완료!")
+                    
+                    # 진행 바 정리
+                    import time
+                    time.sleep(1)
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                else:
+                    st.warning("시각화 추천을 받을 수 없어 기본 시각화를 생성합니다.")
+                    # 기본 시각화 생성
+                    numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+                    if numeric_cols:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.markdown("### 📊 기본 시각화 1")
+                            fig, ax = plt.subplots(figsize=(8, 5))
+                            ax.plot(df[numeric_cols[0]].head(100), marker='o', markersize=3)
+                            ax.set_title(f"{numeric_cols[0]} 변화")
+                            ax.grid(True, alpha=0.3)
+                            st.pyplot(fig)
+                            plt.close(fig)
+                        
+                        with col2:
+                            st.markdown("### 📊 기본 시각화 2") 
+                            fig, ax = plt.subplots(figsize=(8, 5))
+                            ax.hist(df[numeric_cols[0]].dropna(), bins=20, alpha=0.7)
+                            ax.set_title(f"{numeric_cols[0]} 분포")
+                            ax.grid(True, alpha=0.3)
+                            st.pyplot(fig)
+                            plt.close(fig)
                 
                 st.markdown("---")
                 
