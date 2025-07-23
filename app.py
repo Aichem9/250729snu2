@@ -6,6 +6,7 @@ from openai import OpenAI
 import io
 import os
 from datetime import datetime
+import json
 
 st.set_page_config(layout="wide")
 
@@ -35,15 +36,6 @@ st.sidebar.markdown("---")
 st.sidebar.header("데이터셋 업로드")
 uploaded_file = st.sidebar.file_uploader("CSV 파일을 업로드해주세요.", type=["csv"])
 
-# 샘플 데이터셋 경로 개선
-sample_data_options = {
-    "샘플: 북극 해빙 면적 데이터": "data/N_seaice_extent_daily_v3.0.csv",
-}
-
-st.sidebar.markdown("---")
-st.sidebar.info("파일이 없으시면 아래 샘플 데이터셋을 선택하여 테스트할 수 있습니다.")
-selected_sample = st.sidebar.selectbox("또는 샘플 데이터셋 선택", [""] + list(sample_data_options.keys()))
-
 def load_data():
     """데이터 로딩 함수 (에러 처리 강화)"""
     df = None
@@ -61,18 +53,6 @@ def load_data():
                 st.sidebar.error(f"파일 인코딩 오류: {e}")
         except Exception as e:
             st.sidebar.error(f"파일을 읽는 중 오류가 발생했습니다: {e}")
-            
-    elif selected_sample:
-        sample_path = sample_data_options[selected_sample]
-        if os.path.exists(sample_path):
-            try:
-                df = pd.read_csv(sample_path)
-                st.sidebar.success(f"'{selected_sample}' 데이터셋 로드 성공!")
-            except Exception as e:
-                st.sidebar.error(f"샘플 데이터셋을 읽는 중 오류: {e}")
-        else:
-            st.sidebar.warning(f"샘플 파일을 찾을 수 없습니다: {sample_path}")
-            st.sidebar.info("직접 CSV 파일을 업로드해주세요.")
     
     return df
 
@@ -89,7 +69,7 @@ def process_date_columns(df):
         if col in df.columns:
             try:
                 df[col] = pd.to_datetime(df[col], errors='coerce')
-                df = df.dropna(subset=[col])  # 변환 실패한 행 제거
+                df = df.dropna(subset=[col])
                 if not df.empty:
                     df = df.sort_values(col)
                     st.info(f"'{col}' 컬럼을 날짜 형식으로 인식했습니다.")
@@ -112,7 +92,6 @@ def process_date_columns(df):
                     if d in df.columns:
                         df['Date'] = pd.to_datetime(df[[y, m, d]], errors='coerce')
                     else:
-                        # 일(Day) 컬럼이 없으면 1일로 설정
                         df['Date'] = pd.to_datetime(df[y].astype(str) + '-' + df[m].astype(str) + '-01', errors='coerce')
                     
                     df = df.dropna(subset=['Date'])
@@ -127,88 +106,122 @@ def process_date_columns(df):
     
     return df, date_col_found
 
-def create_visualizations(df, date_col_found):
-    """시각화 생성 함수 (에러 처리 강화)"""
+def get_visualization_recommendations(df, user_question, date_col_found):
+    """GPT로부터 시각화 추천을 받는 함수"""
     try:
         numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+        categorical_cols = df.select_dtypes(include=['object']).columns.tolist()
         
-        if not numeric_cols:
-            st.info("시각화할 수 있는 수치 데이터가 없습니다.")
+        # 데이터 구조 정보
+        data_info = {
+            "columns": list(df.columns),
+            "numeric_columns": numeric_cols,
+            "categorical_columns": categorical_cols,
+            "data_size": f"{df.shape[0]} 행, {df.shape[1]} 열",
+            "has_date": date_col_found,
+            "sample_data": df.head(3).to_dict()
+        }
+        
+        if date_col_found and 'Date' in df.columns:
+            data_info["date_range"] = f"{df['Date'].min().strftime('%Y-%m-%d')} ~ {df['Date'].max().strftime('%Y-%m-%d')}"
+        
+        prompt = f"""
+        사용자가 환경 데이터에 대해 다음과 같은 질문을 했습니다: "{user_question}"
+
+        데이터 구조:
+        {json.dumps(data_info, ensure_ascii=False, indent=2)}
+
+        이 데이터와 질문에 가장 적합한 시각화 2개를 추천해주세요. 
+        각 시각화에 대해 다음 형식의 JSON으로 응답해주세요:
+
+        {{
+            "visualization_1": {{
+                "type": "line_plot/bar_plot/scatter_plot/histogram",
+                "title": "그래프 제목",
+                "x_column": "x축 컬럼명",
+                "y_column": "y축 컬럼명",
+                "description": "이 시각화가 보여주는 내용과 의미"
+            }},
+            "visualization_2": {{
+                "type": "line_plot/bar_plot/scatter_plot/histogram",
+                "title": "그래프 제목", 
+                "x_column": "x축 컬럼명",
+                "y_column": "y축 컬럼명",
+                "description": "이 시각화가 보여주는 내용과 의미"
+            }}
+        }}
+
+        주의사항:
+        - x_column과 y_column은 실제 데이터에 존재하는 컬럼명을 사용하세요
+        - 환경 데이터 분석에 의미 있는 시각화를 추천하세요
+        - JSON 형식만 응답하고 다른 텍스트는 포함하지 마세요
+        """
+
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "You are an expert in environmental data visualization. Respond only with valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.3,
+            max_tokens=1000
+        )
+        
+        viz_recommendations = json.loads(response.choices[0].message.content)
+        return viz_recommendations
+        
+    except Exception as e:
+        st.error(f"시각화 추천 중 오류: {e}")
+        return None
+
+def create_visualization_from_recommendation(df, viz_config, viz_num):
+    """GPT 추천에 따라 시각화 생성"""
+    try:
+        viz_type = viz_config.get('type', 'line_plot')
+        title = viz_config.get('title', f'시각화 {viz_num}')
+        x_col = viz_config.get('x_column')
+        y_col = viz_config.get('y_column')
+        description = viz_config.get('description', '')
+        
+        # 컬럼 존재 확인
+        if x_col not in df.columns or y_col not in df.columns:
+            st.warning(f"시각화 {viz_num}: 추천된 컬럼({x_col}, {y_col})이 데이터에 없습니다.")
             return
         
-        if date_col_found and 'Date' in df.columns and len(numeric_cols) > 0:
-            st.write("시간 경과에 따른 주요 수치 데이터 변화 추이:")
-            
-            # 적절한 플롯 컬럼 선택
-            priority_cols = ['Extent', 'Area', 'CO2', 'Anomaly', 'Temperature', 'Value']
-            plot_col = None
-            
-            for col in priority_cols:
-                if col in numeric_cols:
-                    plot_col = col
-                    break
-            
-            if plot_col is None and numeric_cols:
-                plot_col = numeric_cols[0]
-
-            if plot_col and len(df) > 1:
-                try:
-                    fig, ax = plt.subplots(figsize=(12, 6))
-                    
-                    # 기본 라인 플롯
-                    sns.lineplot(x='Date', y=plot_col, data=df, ax=ax, label=f'{plot_col} 값')
-                    
-                    # 추세선 추가 (데이터가 충분할 때만)
-                    if len(df) > 10:
-                        try:
-                            x_numeric = df['Date'].apply(lambda date: date.toordinal())
-                            sns.regplot(x=x_numeric, y=df[plot_col], ax=ax, scatter=False, 
-                                      color='red', line_kws={'linestyle': '--'}, label='추세선')
-                        except Exception:
-                            pass  # 추세선 그리기 실패해도 기본 그래프는 유지
-
-                    ax.set_title(f'시간 경과에 따른 {plot_col} 변화')
-                    ax.set_xlabel('날짜')
-                    ax.set_ylabel(plot_col)
-                    plt.xticks(rotation=45)
-                    plt.grid(True, linestyle='--', alpha=0.7)
-                    plt.legend()
-                    plt.tight_layout()
-                    st.pyplot(fig)
-                    st.caption(f"이 그래프는 {plot_col}이 시간 경과에 따라 어떻게 변화했는지 보여줍니다.")
-
-                    # 월별 분석 (Date 컬럼에서 월 추출)
-                    try:
-                        df['Month_Name'] = df['Date'].dt.strftime('%b')
-                        monthly_avg = df.groupby('Month_Name')[plot_col].mean()
-                        
-                        # 월 순서 정렬
-                        month_order = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                                     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-                        monthly_avg = monthly_avg.reindex([m for m in month_order if m in monthly_avg.index])
-                        
-                        if len(monthly_avg) > 1:
-                            st.write(f"월별 평균 {plot_col} (계절성 패턴):")
-                            fig2, ax2 = plt.subplots(figsize=(10, 5))
-                            sns.barplot(x=monthly_avg.index, y=monthly_avg.values, ax=ax2, palette='viridis')
-                            ax2.set_title(f'월별 평균 {plot_col} (계절성)')
-                            ax2.set_xlabel('월')
-                            ax2.set_ylabel(f'평균 {plot_col}')
-                            plt.tight_layout()
-                            st.pyplot(fig2)
-                            st.caption(f"이 그래프는 연간 {plot_col}의 계절적 변동을 보여줍니다.")
-                    except Exception as e:
-                        st.warning(f"월별 분석 중 오류가 발생했습니다: {e}")
-                        
-                except Exception as e:
-                    st.error(f"시각화 생성 중 오류가 발생했습니다: {e}")
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        if viz_type == 'line_plot':
+            if x_col == 'Date' or 'date' in x_col.lower():
+                sns.lineplot(data=df, x=x_col, y=y_col, ax=ax)
             else:
-                st.info("시각화를 위한 충분한 데이터가 없습니다.")
-        else:
-            st.info("날짜/시간 컬럼과 수치 컬럼이 모두 존재해야 시계열 시각화를 생성할 수 있습니다.")
-    
+                sns.lineplot(data=df, x=x_col, y=y_col, ax=ax)
+                
+        elif viz_type == 'bar_plot':
+            if len(df[x_col].unique()) > 20:  # 너무 많은 카테고리가 있으면 상위 20개만
+                top_values = df.nlargest(20, y_col)
+                sns.barplot(data=top_values, x=x_col, y=y_col, ax=ax)
+                plt.xticks(rotation=45)
+            else:
+                sns.barplot(data=df, x=x_col, y=y_col, ax=ax)
+                plt.xticks(rotation=45)
+                
+        elif viz_type == 'scatter_plot':
+            sns.scatterplot(data=df, x=x_col, y=y_col, ax=ax, alpha=0.6)
+            
+        elif viz_type == 'histogram':
+            sns.histplot(data=df, x=y_col, ax=ax, bins=30)
+            
+        ax.set_title(title, fontsize=14, fontweight='bold')
+        ax.set_xlabel(x_col)
+        ax.set_ylabel(y_col)
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+        
+        st.pyplot(fig)
+        st.caption(f"**{title}**: {description}")
+        
     except Exception as e:
-        st.error(f"시각화 처리 중 오류가 발생했습니다: {e}")
+        st.error(f"시각화 {viz_num} 생성 중 오류: {e}")
 
 def safe_dataframe_to_text(df, method='head'):
     """tabulate 의존성 없이 데이터프레임을 텍스트로 변환"""
@@ -218,13 +231,11 @@ def safe_dataframe_to_text(df, method='head'):
         elif method == 'describe':
             return df.describe().to_markdown()
     except ImportError:
-        # tabulate가 없는 경우 대안
         if method == 'head':
             return df.head().to_string(index=False)
         elif method == 'describe':
             return df.describe().to_string()
     except Exception as e:
-        # 기타 오류 시 기본 문자열 변환
         if method == 'head':
             return str(df.head())
         elif method == 'describe':
@@ -252,11 +263,31 @@ if client and df is not None:
     user_question = st.text_area("업로드된 데이터에 대해 궁금한 점을 질문해주세요:",
                                  placeholder="예: '이 데이터셋에서 해빙 면적의 연간 평균 변화 추세는 어떻게 되나요?', '가장 큰 변화를 보인 기간은 언제인가요?', '이러한 환경 변화가 생태계에 미칠 잠재적 영향은 무엇인가요?'")
 
-    if st.button("답변 생성"):
+    if st.button("분석 시작"):
         if user_question:
-            with st.spinner("GPT가 데이터를 분석 중입니다..."):
+            with st.spinner("GPT가 데이터를 분석하고 시각화를 생성 중입니다..."):
+                
+                # 1단계: 시각화 추천 받기
+                st.subheader("📈 GPT 추천 시각화")
+                viz_recommendations = get_visualization_recommendations(df, user_question, date_col_found)
+                
+                if viz_recommendations:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.markdown("### 📊 시각화 1")
+                        if 'visualization_1' in viz_recommendations:
+                            create_visualization_from_recommendation(df, viz_recommendations['visualization_1'], 1)
+                    
+                    with col2:
+                        st.markdown("### 📊 시각화 2")
+                        if 'visualization_2' in viz_recommendations:
+                            create_visualization_from_recommendation(df, viz_recommendations['visualization_2'], 2)
+                
+                st.markdown("---")
+                
+                # 2단계: 분석 결과 및 인사이트 생성
                 try:
-                    # tabulate 의존성 없이 데이터 요약 정보 준비
                     data_head = safe_dataframe_to_text(df, 'head')
                     data_description = safe_dataframe_to_text(df, 'describe')
                     
@@ -270,7 +301,7 @@ if client and df is not None:
                     
                     prompt = f"""
                     당신은 기후 변화 및 환경 데이터 분석 전문가입니다. 주어진 환경 데이터에 대한 사용자의 질문에 답하고,
-                    필요하다면 시각화를 위한 제안과 환경 변화에 대응하기 위한 의사 결정 또는 정책적 인사이트를 제공해주세요.
+                    환경 변화에 대응하기 위한 의사 결정 또는 정책적 인사이트를 제공해주세요.
 
                     데이터 요약 (첫 5행):
                     {data_head}
@@ -287,13 +318,13 @@ if client and df is not None:
 
                     답변은 다음 형식으로 구성해주세요:
                     1. **환경 데이터 분석 결과:** 질문에 대한 직접적인 데이터 기반 답변
-                    2. **시각화 제안 (선택 사항):** 답변을 뒷받침하기 위한 시각화 아이디어
-                    3. **의사 결정 및 정책 인사이트:** 분석 결과를 바탕으로 한 구체적인 제안
+                    2. **주요 패턴 및 트렌드:** 데이터에서 발견되는 중요한 패턴이나 변화 추세
+                    3. **의사 결정 및 정책 인사이트:** 분석 결과를 바탕으로 한 구체적인 제안 및 대응 방안
+                    4. **향후 연구 방향:** 추가로 필요한 데이터나 연구 방향 제시
                     """
 
-                    # OpenAI API 호출
                     response = client.chat.completions.create(
-                        model="gpt-4",  # 또는 "gpt-3.5-turbo"
+                        model="gpt-4",
                         messages=[
                             {"role": "system", "content": "You are a helpful climate and environmental data analysis expert."},
                             {"role": "user", "content": prompt}
@@ -306,16 +337,10 @@ if client and df is not None:
                     st.subheader("✨ GPT의 분석 결과 및 의사 결정 지원")
                     st.markdown(gpt_response)
 
-                    st.markdown("---")
-                    st.subheader("📈 주요 시각화")
-                    
-                    create_visualizations(df, date_col_found)
-
                 except Exception as e:
-                    st.error(f"GPT API 호출 중 오류가 발생했습니다: {e}")
+                    st.error(f"분석 중 오류가 발생했습니다: {e}")
                     st.info("API 키가 유효한지, 사용 한도가 남아있는지 확인해주세요.")
                     
-                    # 디버깅을 위한 상세 오류 정보 (개발 시에만 사용)
                     if st.checkbox("상세 오류 정보 보기"):
                         st.exception(e)
         else:
@@ -325,7 +350,7 @@ else:
     if not openai_api_key:
         st.info("🔑 왼쪽 사이드바에 OpenAI API 키를 입력해주세요.")
     elif df is None:
-        st.info("📁 왼쪽 사이드바에서 CSV 파일을 업로드하거나 샘플 데이터셋을 선택해주세요.")
+        st.info("📁 왼쪽 사이드바에서 CSV 파일을 업로드해주세요.")
 
 st.markdown("---")
 st.sidebar.markdown("💡 이 앱은 업로드된 환경 데이터 분석을 통해 기후 변화에 대한 의사 결정을 돕기 위해 GPT를 활용합니다.")
